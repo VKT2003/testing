@@ -1,0 +1,304 @@
+flask_app/
+│
+├── app/
+│   ├── __init__.py
+│   ├── extensions.py
+│   ├── models.py
+│   │
+│   ├── routes/
+│   │   ├── __init__.py
+│   │   ├── auth_routes.py
+│   │   ├── property_routes.py
+│   │   └── community_routes.py
+│   │
+│   ├── static/
+│   │   └── uploads/
+│   │
+│   └── config.py
+│
+├── run.py
+└── requirements.txt
+
+
+
+run.py
+from app import create_app
+
+app = create_app()
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
+
+app/init.py
+import os
+from flask import Flask
+from .extensions import db, jwt
+from .routes.auth_routes import auth_bp
+from .routes.property_routes import property_bp
+from .routes.community_routes import community_bp
+
+def create_app():
+    app = Flask(__name__)
+
+    app.config.from_object("app.config.Config")
+
+    # Initialize extensions
+    db.init_app(app)
+    jwt.init_app(app)
+
+    # Register blueprints
+    app.register_blueprint(auth_bp, url_prefix="/api/auth")
+    app.register_blueprint(property_bp, url_prefix="/api")
+    app.register_blueprint(community_bp, url_prefix="/api")
+
+    # Ensure upload folder exists
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
+    with app.app_context():
+        db.create_all()
+
+    return app
+
+app/config.py
+import os
+
+class Config:
+    SECRET_KEY = "your_secret_key_here"
+    SQLALCHEMY_DATABASE_URI = "sqlite:///database.db"
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    JWT_SECRET_KEY = "your_jwt_secret_key_here"
+    UPLOAD_FOLDER = os.path.join(os.getcwd(), "app", "static", "uploads")
+
+app/extension.py
+from flask_sqlalchemy import SQLAlchemy
+from flask_jwt_extended import JWTManager
+
+db = SQLAlchemy()
+jwt = JWTManager()
+
+
+app/model.py
+from datetime import datetime
+from .extensions import db
+from werkzeug.security import generate_password_hash, check_password_hash
+
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(200), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    properties = db.relationship('Property', backref='owner', lazy=True)
+    communities = db.relationship('Community', backref='creator', lazy=True)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+
+class Property(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.Text)
+    price = db.Column(db.Float, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+
+class Community(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    images = db.relationship('CommunityImage', backref='community', lazy=True)
+
+
+class CommunityImage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    image_url = db.Column(db.String(200), nullable=False)
+    community_id = db.Column(db.Integer, db.ForeignKey('community.id'), nullable=False)
+
+
+aut_route.py
+from flask import Blueprint, request, jsonify
+from app.extensions import db
+from app.models import User
+from flask_jwt_extended import create_access_token
+
+auth_bp = Blueprint("auth", __name__)
+
+@auth_bp.route("/register", methods=["POST"])
+def register():
+    data = request.get_json()
+    if not all(k in data for k in ("username", "email", "password")):
+        return jsonify({"error": "Missing fields"}), 400
+
+    if User.query.filter((User.username == data["username"]) | (User.email == data["email"])).first():
+        return jsonify({"error": "Username or email already exists"}), 400
+
+    user = User(username=data["username"], email=data["email"])
+    user.set_password(data["password"])
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify({"message": "User registered successfully"}), 201
+
+
+@auth_bp.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    user = User.query.filter_by(email=data.get("email")).first()
+
+    if not user or not user.check_password(data.get("password")):
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    token = create_access_token(identity=user.id)
+    return jsonify({"token": token, "username": user.username, "user_id": user.id})
+
+
+community_route.py
+
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from app.extensions import db
+from app.models import Property
+
+property_bp = Blueprint("property", __name__)
+
+@property_bp.route("/properties", methods=["POST"])
+@jwt_required()
+def create_property():
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    if not all(k in data for k in ("title", "price")):
+        return jsonify({"error": "Missing title or price"}), 400
+
+    prop = Property(
+        title=data["title"],
+        description=data.get("description", ""),
+        price=data["price"],
+        user_id=user_id
+    )
+    db.session.add(prop)
+    db.session.commit()
+
+    return jsonify({"message": "Property created"}), 201
+
+
+@property_bp.route("/properties", methods=["GET"])
+def list_properties():
+    props = Property.query.all()
+    result = []
+    for p in props:
+        result.append({
+            "id": p.id,
+            "title": p.title,
+            "description": p.description,
+            "price": p.price,
+            "owner": {
+                "id": p.owner.id,
+                "username": p.owner.username,
+                "email": p.owner.email
+            }
+        })
+    return jsonify(result)
+
+
+@property_bp.route("/my-properties", methods=["GET"])
+@jwt_required()
+def my_properties():
+    user_id = get_jwt_identity()
+    props = Property.query.filter_by(user_id=user_id).all()
+    result = [{"id": p.id, "title": p.title, "description": p.description, "price": p.price} for p in props]
+    return jsonify(result)
+
+
+@property_bp.route("/properties/<int:user_id>", methods=["GET"])
+def get_properties_by_user(user_id):
+    props = Property.query.filter_by(user_id=user_id).all()
+    if not props:
+        return jsonify({"message": "No properties found"}), 404
+
+    result = []
+    for p in props:
+        result.append({
+            "id": p.id,
+            "title": p.title,
+            "description": p.description,
+            "price": p.price,
+            "owner": {
+                "id": p.owner.id,
+                "username": p.owner.username,
+                "email": p.owner.email
+            }
+        })
+    return jsonify(result)
+
+requirement
+Flask==3.0.3
+Flask-JWT-Extended==4.6.0
+Flask-SQLAlchemy==3.1.1
+Werkzeug==3.0.2
+
+profile
+
+# routes/profile_routes.py
+
+from flask import Blueprint, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from ..models import User
+
+profile_bp = Blueprint('profile', __name__)
+
+@profile_bp.route('/me', methods=['GET'])
+@jwt_required()
+def get_profile():
+    user_id = get_jwt_identity()
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    response = {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "created_at": user.created_at,
+        
+        # ✅ User's Properties
+        "properties": [
+            {
+                "id": p.id,
+                "title": p.title,
+                "description": p.description,
+                "price": p.price,
+                "created_at": p.created_at
+            } for p in user.properties
+        ],
+
+        # ✅ User's Communities with images
+        "communities": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "description": c.description,
+                "created_at": c.created_at,
+                "images": [
+                    {
+                        "id": img.id,
+                        "image_url": img.image_url,
+                        "community_id": img.community_id
+                    } for img in c.images
+                ]
+            } for c in user.communities
+        ]
+    }
+
+    return jsonify(response), 200
