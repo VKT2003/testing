@@ -302,3 +302,116 @@ def get_profile():
     }
 
     return jsonify(response), 200
+
+
+
+
+
+
+import os
+from flask import Blueprint, request, jsonify, current_app
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from werkzeug.utils import secure_filename
+from app.extensions import db
+from app.models import Community, CommunityImage
+
+community_bp = Blueprint("community", __name__)
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {"png", "jpg", "jpeg"}
+
+@community_bp.route("/communities", methods=["POST"])
+@jwt_required()
+def create_community():
+    user_id = get_jwt_identity()
+    name = request.form.get("name")
+    description = request.form.get("description")
+
+    if not name:
+        return jsonify({"error": "Community name required"}), 400
+
+    community = Community(name=name, description=description, user_id=user_id)
+    db.session.add(community)
+    db.session.commit()
+
+    # Save uploaded images
+    files = request.files.getlist("images")
+    image_urls = []
+    for file in files:
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(current_app.config["UPLOAD_FOLDER"], filename)
+            os.makedirs(current_app.config["UPLOAD_FOLDER"], exist_ok=True)
+            file.save(filepath)
+            rel_path = f"/static/uploads/{filename}"
+            db.session.add(CommunityImage(image_url=rel_path, community_id=community.id))
+            image_urls.append(rel_path)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Community created successfully",
+        "community": {
+            "id": community.id,
+            "name": community.name,
+            "description": community.description,
+            "images": image_urls
+        }
+    }), 201
+
+
+@community_bp.route("/communities", methods=["GET"])
+def list_communities():
+    communities = Community.query.all()
+    result = []
+    for c in communities:
+        result.append({
+            "id": c.id,
+            "name": c.name,
+            "description": c.description,
+            "creator": {
+                "id": c.creator.id,
+                "username": c.creator.username,
+                "email": c.creator.email
+            },
+            "images": [img.image_url for img in c.images]
+        })
+    return jsonify(result)
+
+
+@community_bp.route("/my-communities", methods=["GET"])
+@jwt_required()
+def my_communities():
+    user_id = get_jwt_identity()
+    communities = Community.query.filter_by(user_id=user_id).all()
+    result = []
+    for c in communities:
+        result.append({
+            "id": c.id,
+            "name": c.name,
+            "description": c.description,
+            "images": [img.image_url for img in c.images]
+        })
+    return jsonify(result)
+
+
+@community_bp.route("/communities/<int:user_id>", methods=["GET"])
+def get_communities_by_user(user_id):
+    communities = Community.query.filter_by(user_id=user_id).all()
+    if not communities:
+        return jsonify({"message": "No communities found"}), 404
+
+    result = []
+    for c in communities:
+        result.append({
+            "id": c.id,
+            "name": c.name,
+            "description": c.description,
+            "creator": {
+                "id": c.creator.id,
+                "username": c.creator.username,
+                "email": c.creator.email
+            },
+            "images": [img.image_url for img in c.images]
+        })
+    return jsonify(result)
+
